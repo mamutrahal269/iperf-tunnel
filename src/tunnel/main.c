@@ -5,22 +5,14 @@
 #include "tunnel.h"
 
 int main(int argc, char *argv[]) {
-  if (argc < 2) {
-    fprintf(stderr, "usage: %s c <host> | s\n", argv[0]);
-    return 1;
-  }
-
   struct iperf_test *test = iperf_new_test();
   iperf_defaults(test);
   iperf_set_test_logfile(test, "/dev/null");
   if (argv[1][0] == 'c') {
-    if (argc < 3) {
-      fprintf(stderr, "usage: %s c <host>\n", argv[0]);
-      return 1;
-    }
     iperf_set_test_role(test, 'c');
     iperf_set_test_bidirectional(test, 1);
     iperf_set_test_server_hostname(test, argv[2]);
+    iperf_set_test_blksize(test, atoi(argv[3]));
     iperf_set_test_duration(test, 0);
     tunnel_client_init(test);
     if (iperf_run_client(test) < 0) {

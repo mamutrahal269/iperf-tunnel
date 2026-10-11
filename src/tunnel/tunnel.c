@@ -53,6 +53,7 @@ int tunnel_tcp_recv(struct iperf_stream *sp) {
 
   char *buffer = malloc(blk);
   if (read_blk(sp->socket, buffer, blk)) {
+    free(buffer);
     return -1;
   }
   queue_push(queue_rx, buffer);

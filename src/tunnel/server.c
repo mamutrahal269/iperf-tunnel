@@ -245,11 +245,6 @@ static void *tunnel_server(void *a) {
       } else {
         if (!we) {
           pthread_mutex_unlock(&tbl_mtx);
-          if (!(hdr->flags & FLAG_CLOSE_CONN)) {
-            // PLOG("unknown id");
-            fprintf(stderr, "unknown id %lu len=%u flags=%u\n",
-                    (unsigned long)hdr->id, hdr->len, hdr->flags);
-          }
           free(buffer);
           continue;
         }
