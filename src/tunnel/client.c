@@ -345,7 +345,7 @@ static void *tunnel_client(void *a) {
       {.fd = queue_get_eventfd(queue_rx), .events = POLLIN},
       {.fd = lfd, .events = POLLIN}};
   while (1) {
-    int r = poll(pollfds, 3, 5500);
+    int r = poll(pollfds, 3, 500);
     if (r < 0) {
       if (errno != EINTR) {
         PERR("poll");
