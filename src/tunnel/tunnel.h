@@ -8,13 +8,36 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/random.h>
+#include <sys/timerfd.h>
 #include <unistd.h>
 
 #define HDR_SZ sizeof(tunnel_hdr)
 #define HDR_CONN_SZ sizeof(tunnel_conn_info)
+
 #define PERR(msg)                                                              \
   fprintf(stderr, "%s: %s: %s\n", __func__, msg, strerror(errno))
 #define PLOG(msg) fprintf(stderr, "%s: %s\n", __func__, msg)
+
+extern int tunnel_idle_min_ms;
+extern int tunnel_idle_max_ms;
+
+static inline int rnd_idle_ms(void) {
+  uint32_t r;
+  getrandom(&r, sizeof(r), 0);
+  int range = tunnel_idle_max_ms - tunnel_idle_min_ms + 1;
+  if (range <= 0)
+    range = 1;
+  return (int)(r % (uint32_t)range) + tunnel_idle_min_ms;
+}
+
+static inline void timerfd_arm(int tfd, int interval_ms) {
+  struct itimerspec its = {
+      .it_value = {.tv_sec = interval_ms / 1000, .tv_nsec = (interval_ms % 1000) * 1000000},
+      .it_interval = {0},
+  };
+  timerfd_settime(tfd, 0, &its, NULL);
+}
 
 extern struct queue *queue_tx;
 extern struct queue *queue_rx;

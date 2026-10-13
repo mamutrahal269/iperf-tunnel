@@ -1,3 +1,5 @@
+#include "iperf_config.h"
+
 #include "client.h"
 #include "iperf.h"
 #include "iperf_api.h"
@@ -16,7 +18,9 @@
 #include <string.h>
 #include <sys/eventfd.h>
 #include <sys/poll.h>
+#include <sys/random.h>
 #include <sys/socket.h>
+#include <sys/timerfd.h>
 #include <sys/types.h>
 #include <unistd.h>
 #include <uthash.h>
@@ -29,18 +33,16 @@ typedef struct {
   uint64_t id;
   struct queue *q;
   UT_hash_handle hh;
-} tunnel_centry;
+} tunnel_wentry;
 typedef struct {
-  tunnel_centry *ent;
+  tunnel_wentry *ent;
   int sockfd;
   int blksize;
-} tunnel_cargs;
+} tunnel_wargs;
 
-static tunnel_centry *tbl;
+static tunnel_wentry *tbl;
 static pthread_mutex_t tbl_mtx = PTHREAD_MUTEX_INITIALIZER;
 static pthread_t cli_th;
-static int cli_started;
-static uint64_t next_id = 1;
 static int efd_cli_exit = -1;
 static __attribute__((constructor)) void efd_init() {
   if ((efd_cli_exit = eventfd(0, EFD_SEMAPHORE)) < 0) {
@@ -177,20 +179,17 @@ fail:
   return -1;
 }
 
-/* ---------------------------- worker ---------------------------- */
-
 static void *tunnel_worker(void *a) {
-  tunnel_cargs *wa = (tunnel_cargs *)a;
+  tunnel_wargs *wa = (tunnel_wargs *)a;
   int sockfd = wa->sockfd;
   char closed = 0;
-  char announced = 0; /* NEW_CONN already sent to the server */
 
   char host[sizeof(((tunnel_conn_info *)0)->addr)];
   uint16_t port = 0;
-  struct pollfd pollfds[2];
 
   if (socks5_handshake(sockfd, host, sizeof(host), &port)) {
     PLOG("socks5 handshake failed");
+    closed = 1;
     goto cleanup;
   }
 
@@ -204,13 +203,12 @@ static void *tunnel_worker(void *a) {
     ci->port = port;
     strncpy(ci->addr, host, sizeof(ci->addr) - 1);
     queue_push(queue_tx, buffer);
-    announced = 1;
   }
   socks5_reply(sockfd, 0x00); /* succeeded */
 
-  pollfds[0] =
-      (struct pollfd){.fd = queue_get_eventfd(wa->ent->q), .events = POLLIN};
-  pollfds[1] = (struct pollfd){.fd = sockfd, .events = POLLIN};
+  struct pollfd pollfds[2] = {
+      {.fd = queue_get_eventfd(wa->ent->q), .events = POLLIN},
+      {.fd = sockfd, .events = POLLIN}};
   while (1) {
     int r = poll(pollfds, 2, -1);
     if (r < 0) {
@@ -281,7 +279,7 @@ cleanup:
   HASH_DEL(tbl, wa->ent);
   pthread_mutex_unlock(&tbl_mtx);
 
-  if (announced && !closed) {
+  if (!closed) {
     send_close_blk(wa->blksize, wa->ent->id);
   }
 
@@ -300,11 +298,14 @@ cleanup:
 }
 
 static void client_new_conn(int blksize, int connfd) {
-  tunnel_centry *ce = malloc(sizeof(tunnel_centry));
-  ce->id = next_id++;
+  tunnel_wentry *ce = malloc(sizeof(tunnel_wentry));
+  if (getrandom(&ce->id, sizeof(ce->id), 0) < 0) {
+    PERR("getrandom");
+    exit(EXIT_FAILURE);
+  }
   ce->q = queue_new();
 
-  tunnel_cargs *wa = malloc(sizeof(tunnel_cargs));
+  tunnel_wargs *wa = malloc(sizeof(tunnel_wargs));
   wa->ent = ce;
   wa->sockfd = connfd;
   wa->blksize = blksize;
@@ -340,23 +341,26 @@ static void *tunnel_client(void *a) {
     return NULL;
   }
 
-  struct pollfd pollfds[3] = {
+  int timerfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+  if (timerfd < 0) {
+    PERR("timerfd_create");
+    close(lfd);
+    return NULL;
+  }
+  timerfd_arm(timerfd, rnd_idle_ms());
+
+  struct pollfd pollfds[4] = {
       {.fd = efd_cli_exit, .events = POLLIN},
       {.fd = queue_get_eventfd(queue_rx), .events = POLLIN},
-      {.fd = lfd, .events = POLLIN}};
+      {.fd = lfd, .events = POLLIN},
+      {.fd = timerfd, .events = POLLIN}};
   while (1) {
-    int r = poll(pollfds, 3, 500);
+    int r = poll(pollfds, 4, -1);
     if (r < 0) {
       if (errno != EINTR) {
         PERR("poll");
         break;
       }
-      continue;
-    } else if (r == 0) {
-      char *buffer = calloc(1, blksize);
-      tunnel_hdr *hdr = set_hdr(buffer);
-      hdr->flags = FLAG_EMPTY;
-      queue_push(queue_tx, buffer);
       continue;
     }
     if (pollfds[0].revents & POLLIN) {
@@ -365,6 +369,15 @@ static void *tunnel_client(void *a) {
         PERR("read(efd_cli_exit)");
       }
       break;
+    }
+    if (pollfds[3].revents & POLLIN) {
+      uint64_t val;
+      read(timerfd, &val, sizeof(val));
+      char *buffer = calloc(1, blksize);
+      tunnel_hdr *hdr = set_hdr(buffer);
+      hdr->flags = FLAG_EMPTY;
+      queue_push(queue_tx, buffer);
+      timerfd_arm(timerfd, rnd_idle_ms());
     }
     if (pollfds[2].revents & POLLIN) {
       int connfd = accept(lfd, NULL, NULL);
@@ -388,7 +401,7 @@ static void *tunnel_client(void *a) {
         continue;
       }
 
-      tunnel_centry *ce;
+      tunnel_wentry *ce;
       pthread_mutex_lock(&tbl_mtx);
       HASH_FIND(hh, tbl, &hdr->id, sizeof(hdr->id), ce);
       if (!ce) {
@@ -402,8 +415,9 @@ static void *tunnel_client(void *a) {
   }
 
   close(lfd);
+  close(timerfd);
 
-  tunnel_centry *ce, *tmp;
+  tunnel_wentry *ce, *tmp;
   pthread_mutex_lock(&tbl_mtx);
   HASH_ITER(hh, tbl, ce, tmp) {
     char *buffer = calloc(1, blksize);
@@ -420,7 +434,6 @@ static void tunnel_run_cb(struct iperf_test *test) {
     PERR("pthread_create");
     exit(EXIT_FAILURE);
   }
-  cli_started = 1;
 }
 void tunnel_client_init(struct iperf_test *test) {
   test->protocol->recv = tunnel_tcp_recv;
@@ -428,16 +441,16 @@ void tunnel_client_init(struct iperf_test *test) {
   iperf_set_on_test_start_callback(test, tunnel_run_cb);
 }
 void tunnel_client_cleanup(void) {
-  if (!cli_started) {
+  if (cli_th == 0) {
     return;
   }
-  cli_started = 0;
 
   uint64_t val = 1;
   if (write(efd_cli_exit, &val, sizeof(val)) < 0) {
     PERR("write(efd_cli_exit)");
   }
   pthread_join(cli_th, NULL);
+  cli_th = 0;
 
   void *item;
   while (queue_size(queue_rx) > 0 && queue_pop(queue_rx, &item)) {

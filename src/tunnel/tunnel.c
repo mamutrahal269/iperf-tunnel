@@ -1,3 +1,5 @@
+#include "iperf_config.h"
+
 #include "tunnel.h"
 #include "iperf.h"
 #include "iperf_api.h"
@@ -7,6 +9,9 @@
 
 struct queue *queue_tx;
 struct queue *queue_rx;
+
+int tunnel_idle_min_ms = 100;
+int tunnel_idle_max_ms = 1000;
 static __attribute__((constructor)) void q_init() {
   queue_tx = queue_new();
   queue_rx = queue_new();

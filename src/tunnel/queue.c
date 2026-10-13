@@ -1,3 +1,5 @@
+#include "iperf_config.h"
+
 #include "queue.h"
 #include <asm-generic/errno-base.h>
 #include <errno.h>

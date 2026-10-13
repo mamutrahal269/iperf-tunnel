@@ -1,3 +1,5 @@
+#include "iperf_config.h"
+
 #include "client.h"
 #include "iperf.h"
 #include "iperf_api.h"
@@ -24,6 +26,8 @@ int main(int argc, char *argv[]) {
       {"rsa-public-key-path", required_argument, 0, OPT_CLIENT_RSA_PUBLIC_KEY},
       {"rsa-private-key-path", required_argument, 0,
        OPT_SERVER_RSA_PRIVATE_KEY},
+      {"idle-interval-min", required_argument, 0, 'm'},
+      {"idle-interval-max", required_argument, 0, 'x'},
       {"authorized-users-path", required_argument, 0,
        OPT_SERVER_AUTHORIZED_USERS},
       {0, 0, 0, 0}};
@@ -33,7 +37,7 @@ int main(int argc, char *argv[]) {
 
   int opt;
   opterr = 1;
-  while ((opt = getopt_long(argc, argv, "hc:sp:l:", opts, NULL)) != -1) {
+  while ((opt = getopt_long(argc, argv, "hc:sp:l:m:x:", opts, NULL)) != -1) {
     switch (opt) {
     case 'h':
       // clang-format off
@@ -44,6 +48,8 @@ int main(int argc, char *argv[]) {
       printf("  -s, --server              run in server mode\n");
       printf("  -p, --port                server port to listen on/connect to\n");
       printf("  -l, --length              size of tunnel frame\n");
+      printf("  -m, --idle-interval-min   idle block interval min (ms)\n");
+      printf("  -x, --idle-interval-max   idle block interval max (ms)\n");
       printf("  --username                username for authentication\n");
       printf("  --rsa-public-key-path     path to the RSA public key used to encrypt\n");
       printf("  --rsa-private-key-path    path to the RSA private key used to decrypt\n");
@@ -62,6 +68,12 @@ int main(int argc, char *argv[]) {
       break;
     case 'l':
       iperf_set_test_blksize(test, atoi(optarg));
+      break;
+    case 'm':
+      tunnel_idle_min_ms = atoi(optarg);
+      break;
+    case 'x':
+      tunnel_idle_max_ms = atoi(optarg);
       break;
     case OPT_CLIENT_USERNAME:
       iperf_set_test_client_username(test, optarg);
@@ -90,9 +102,8 @@ int main(int argc, char *argv[]) {
 
     char *pw = NULL;
     if ((pw = getenv("IPERF3_PASSWORD")) != NULL) {
-      pw = strdup(pw);
+      iperf_set_test_client_password(test, pw);
     }
-    test->settings->client_password = pw;
 
     tunnel_client_init(test);
     if (iperf_run_client(test) < 0) {

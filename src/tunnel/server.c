@@ -1,8 +1,10 @@
-#include "server.h"
+#include "iperf_config.h"
+
 #include "iperf.h"
 #include "iperf_api.h"
 #include "net.h"
 #include "queue.h"
+#include "server.h"
 #include "tunnel.h"
 
 #include <errno.h>
@@ -15,7 +17,9 @@
 #include <string.h>
 #include <sys/eventfd.h>
 #include <sys/poll.h>
+#include <sys/random.h>
 #include <sys/socket.h>
+#include <sys/timerfd.h>
 #include <sys/types.h>
 #include <unistd.h>
 #include <uthash.h>
@@ -157,22 +161,24 @@ static void *tunnel_server(void *a) {
   struct iperf_test *test = (struct iperf_test *)a;
   int blksize = test->settings->blksize;
 
-  struct pollfd pollfds[2] = {
+  int timerfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+  if (timerfd < 0) {
+    PERR("timerfd_create");
+    return NULL;
+  }
+  timerfd_arm(timerfd, rnd_idle_ms());
+
+  struct pollfd pollfds[3] = {
       {.fd = efd_serv_exit, .events = POLLIN},
-      {.fd = queue_get_eventfd(queue_rx), .events = POLLIN}};
+      {.fd = queue_get_eventfd(queue_rx), .events = POLLIN},
+      {.fd = timerfd, .events = POLLIN}};
   while (1) {
-    int r = poll(pollfds, 2, 500); // TODO:  рандомное время ожидания
+    int r = poll(pollfds, 3, -1);
     if (r < 0) {
       if (errno != EINTR) {
         PERR("poll");
         exit(EXIT_FAILURE);
       }
-      continue;
-    } else if (r == 0) {
-      char *buffer = calloc(1, blksize);
-      tunnel_hdr *hdr = set_hdr(buffer);
-      hdr->flags = FLAG_EMPTY;
-      queue_push(queue_tx, buffer);
       continue;
     }
     if (pollfds[0].revents & POLLIN) {
@@ -187,7 +193,17 @@ static void *tunnel_server(void *a) {
         queue_push(we->q, buffer);
       }
       pthread_mutex_unlock(&tbl_mtx);
+      close(timerfd);
       return NULL;
+    }
+    if (pollfds[2].revents & POLLIN) {
+      uint64_t val;
+      read(timerfd, &val, sizeof(val));
+      char *buffer = calloc(1, blksize);
+      tunnel_hdr *hdr = set_hdr(buffer);
+      hdr->flags = FLAG_EMPTY;
+      queue_push(queue_tx, buffer);
+      timerfd_arm(timerfd, rnd_idle_ms());
     }
     if (pollfds[1].revents & POLLIN) {
       char *buffer = NULL;
@@ -267,6 +283,9 @@ void tunnel_server_init(struct iperf_test *test) {
   iperf_set_on_test_start_callback(test, tunnel_run_cb);
 }
 void tunnel_server_cleanup() {
+  if (serv_th == 0) {
+    return;
+  }
   uint64_t val = 1;
   write(efd_serv_exit, &val, sizeof(val));
   pthread_join(serv_th, NULL);
