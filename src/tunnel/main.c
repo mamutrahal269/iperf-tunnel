@@ -91,8 +91,6 @@ int main(int argc, char *argv[]) {
     case OPT_LOGFILE:
       iperf_set_test_logfile(test, optarg);
       break;
-    default:
-      fprintf(stderr, "unknown option: '%c'\n", opt);
     }
   }
 

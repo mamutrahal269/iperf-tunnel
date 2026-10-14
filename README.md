@@ -1,173 +1,205 @@
-![iperf3 logo](images/iperf3-logos-0413_6.png "iperf3 logo")
+# iperf-tunnel
 
-iperf3:  A TCP, UDP, and SCTP network bandwidth measurement tool
-================================================================
+SOCKS5-прокси c маскировкой под бенч `iperf3`.
 
-Summary
--------
+Это форк [esnet/iperf](https://github.com/esnet/iperf) (iperf 3.22+, лицензия
+BSD-3-Clause). Всё, что умеет оригинальный iperf3, здесь сохранилось, но
+основной бинарник проекта - `iperf-tunnel`: он переиспользует стек iperf3, а вместо
+замеров мультиплексирует данные
+SOCKS5-прокси.
 
-iperf is a tool for active measurement of the maximum achievable
-bandwidth on IP networks.  It supports tuning of various parameters
-related to timing, protocols, and buffers.  For each test it reports
-the measured throughput / bitrate, loss, and other parameters.
+---
 
-This version, sometimes referred to as iperf3, is a redesign of an
-original version developed at NLANR/DAST.  iperf3 is a new
-implementation from scratch, with the goal of a smaller, simpler code
-base, and a library version of the functionality that can be used in
-other programs. iperf3 also has a number of features found in other tools
-such as nuttcp and netperf, but were missing from the original iperf.
-These include, for example, a zero-copy mode and optional JSON output.
-Note that iperf3 is *not* backwards compatible with the original iperf.
+## Устройство протокола
 
-One of the primary uses for iperf3 is as a component of the perfSONAR
-network measurement system (https://www.perfsonar.net/). It is also
-useful as a standalone tool, and is used as such by ESnet and other
-R&E networks. It has also been found useful in the general networking
-community and has even found its way into various commercial products.
+Клиент поднимает локальный SOCKS5-прокси и упаковывает каждый SOCKS5-коннект
+внутрь обычной iperf3-сессии. Снаружи это настоящий iperf3(хоть и со специфичными
+настройками): тест скорости
+(JSON-хэндшейк, параметры теста) проходит штатным кодом `iperf_run_client` /
+`iperf_run_server`.
 
-Primary development for iperf3 takes place on Ubuntu Linux, FreeBSD,
-and macOS.  At this time, these are the only officially supported
-platforms, however there have been some reports of success with
-OpenBSD, NetBSD, Android, Solaris, and other Linux distributions.
+Три механизма, из-за которых трафик <u>почти</u> неотличим от обычного замера:
 
-iperf3 is principally developed by ESnet / Lawrence Berkeley National
-Laboratory.  It is released under a three-clause BSD license.
+1. **Настоящий контрольный канал iperf3.** Рукопожатие, описание теста,
+   отчёты - всё формирует сам iperf3. 
+2. **Блоки фиксированного размера.** Тело - всегда ровно `blksize` байт
+   (`-l`, по умолчанию 128 КиБ, но рекомендую выставлять его чуть меньше MTU):
+   внутри заголовок на 16 байт `{ id: u64, len: u32, flags: u32 }` и полезная нагрузка
+   (см. `src/tunnel/tunnel.h`).
+3. **Заполнение канала при простое.** Пока данных нет, каждые `100…1000 мс`
+   (случайный интервал, `getrandom()`) шлётся пустой блок `FLAG_EMPTY` -
+   в обе стороны. Поток не замирает и не имеет периодичности, которую
+   можно выцепить простой статистикой.
 
-For more information see: https://software.es.net/iperf
+### Ограничения
 
-Source code and issue tracker: https://github.com/esnet/iperf
+* Шифрование пока не реализовано.
+* Один запущенный сервер может обслуживать лишь одного клиента.
+  * Для нескольких юзеров следует запускать iperf-tunnel на разные порты.
+* Туннель работает только по TCP.
 
-Discussion forums: https://github.com/esnet/iperf/discussions
+---
 
-Reporting security vulnerabilities: iperf@es.net
+## Сборка
 
-Frequently Asked Questions: https://software.es.net/iperf/faq.html
+### Зависимости
 
-Obtaining iperf3
-----------------
+```sh
+# Debian/Ubuntu
+sudo apt install build-essential libssl-dev libsctp-dev
+```
 
-Downloads of iperf3 are available at:
+### Первый запуск
 
-    https://downloads.es.net/pub/iperf/
+```sh
+./configure
+make -C src/tunnel   # ./iperf-tunnel
+```
 
-To check out the most recent code, clone the git repository at:
+### Обычный iperf3
 
-    https://github.com/esnet/iperf.git
+```sh
+./configure && make
+```
 
-Building iperf3
----------------
+---
 
-### Prerequisites: ###
+## Запуск
 
-None.
+### 1. Сервер
 
-### Building ###
+```sh
+./iperf-tunnel -s -p 5202
+```
 
-    ./configure; make; make install
+Слушает iperf3-порт и после каждого подключения клиента остаётся работать
+(цикл `iperf_run_server`). Другие опции не нужны: адрес и порт цели клиент
+передаёт сам - сервер просто устанавливает соединение по ним.
 
-(Note: If configure fails, try running `./bootstrap.sh` first)
+### 2. Клиент
 
-Invoking iperf3
----------------
+```sh
+./iperf-tunnel -c web.max.ru -p 5202
+```
 
-iperf3 includes a manual page listing all of the command-line options.
-The manual page is the most up-to-date reference to the various flags and parameters.
+Поднимает **SOCKS5-прокси на `127.0.0.1:8888`**
 
-For sample command line usage, see:
+### 3. Проверка и использование
 
-https://fasterdata.es.net/performance-testing/network-troubleshooting-tools/iperf/
+```sh
+# через curl
+curl --socks5-hostname 127.0.0.1:8888 https://ifconfig.co
 
-Using the default options, iperf is meant to show typical well
-designed application performance.  "Typical well designed application"
-means avoiding artificial enhancements that work only for testing
-(such as splice()'ing the data to /dev/null).  iperf does also have
-flags for "extreme best case" optimizations, but they must be
-explicitly activated.
+# в браузере: SOCKS5 127.0.0.1:8888
+```
 
-These flags include:
+SOCKS5 реализован только режим **CONNECT** (IPv4/IPv6/домены), без
+аутентификации SOCKS.
 
-    -Z, --zerocopy            use a 'zero copy' sendfile() method of sending data
-    -A, --affinity n/n,m      set CPU affinity
+---
 
-Bug and Security Reports
-------------------------
+## Опции
 
-Before submitting a bug report, please make sure you're running the
-latest version of the code, and confirm that your issue has not
-already been fixed.  Then submit to the iperf3 issue tracker on
-GitHub:
+`iperf-tunnel` понимает **только** перечисленное ниже. Это не полный набор
+флагов `iperf3`: `getopt` в `src/tunnel/main.c` описан явно, посторонняя
+опция даёт сообщение `invalid option`, после чего она
+просто игнорируется и программа продолжает работу:
 
-https://github.com/esnet/iperf/issues
+| опция | описание | по умолчанию |
+|---|---|---|
+| `-h, --help` | справка | — |
+| `-s, --server` | режим сервера | — |
+| `-c, --client HOST` | режим клиента, адрес сервера | — |
+| `-p, --port` | iperf3-порт | `5201` |
+| `-l, --length` | размер блока (кадра) в байтах | `131072` (128 КиБ) |
+| `-m, --idle-interval-min` | минимум паузы между keepalive, мс | `100` |
+| `-x, --idle-interval-max` | максимум паузы между keepalive, мс | `1000` |
+| `--username` | имя пользователя для аутентификации | — |
+| `--rsa-public-key-path` | публичный RSA-ключ (клиент) | — |
+| `--rsa-private-key-path` | приватный RSA-ключ (сервер) | — |
+| `--authorized-users-path` | файл авторизованных пользователей (сервер) | — |
+| `--logfile` | писать вывод в файл | `/dev/null` |
 
-In your issue submission, please indicate the version of iperf3 and
-what platform you're trying to run on (provide the platform
-information even if you're not using a supported platform, we
-*might* be able to help anyway).  Exact command-line arguments will
-help us recreate your problem.  If you're getting error messages,
-please include them verbatim if possible, but remember to sanitize any
-sensitive information.
+Пара `-m/-x` задаёт диапазон, из которого случайно выбирается интервал
+keepalive: `rnd_idle_ms()` берёт значение из `[min, max]` через `getrandom()`.
 
-If you have a question about usage or about the code, please do *not*
-submit an issue.  Please use one of the mailing lists for that.
+---
 
-If you suspect there is a potential security issue, please contact the
-developers at:
+## Аутентификация
 
-iperf@es.net
+Аутентификация - штатная для iperf3: пароль уходит к серверу, зашифрованный
+RSA, сервер сверяет хеш с файлом пользователей. Включается так:
+клиенту нужны `--username` + `--rsa-public-key-path`, серверу -
+`--rsa-private-key-path` + `--authorized-users-path` (каждая пара
+обязательна целиком, по одному флагу - ошибка).
 
-Relation to iperf 2.x
----------------------
+### 1. Ключи
 
-Although iperf2 and iperf3 both measure network performance,
-they are not compatible with each other.
-The projects (as of early 2026) are in active, but separate, development.
-The continuing iperf2 development
-project can be found at https://sourceforge.net/projects/iperf2/.
+Создание RSA ключей:
 
-Known Issues
-------------
+```sh
+openssl genrsa -out private.pem 2048
+openssl rsa -in private.pem -pubout -out public.pem
+```
 
-A set of known issues is maintained on the iperf3 Web pages:
+Приватный ключ должен быть в PEM и **без пароля** (иначе сервер его не
+примет).
 
-https://software.es.net/iperf/dev.html#known-issues
+### 2. Файл пользователей
 
-Links
------
+Формат строки: `имя,hex-хеш`, где хеш -
+`sha256("{имя}пароль")`, с фигурными скобками вокруг имени. Пустые строки и
+строки, начинающиеся с `#`, пропускаются.
 
-This section lists links to user-contributed Web pages regarding
-iperf3.  ESnet and Lawrence Berkeley National Laboratory bear no
-responsibility for the content of these pages.
+```sh
+HASH=$(printf '%s' '{bob}secret' | sha256sum | cut -d' ' -f1)
+echo "bob,${HASH}" >> ./users.csv
+```
 
-* Installation instructions for Debian Linux (by Cameron Camp
-  <cameron@ivdatacenter.com>):
+### 3. Запуск
 
-  http://cheatsheet.logicalwebhost.com/iperf-network-testing/
+```sh
+# сервер
+./iperf-tunnel -s -p 5201 \
+  --rsa-private-key-path ./private.pem \
+  --authorized-users-path ./users.csv
 
-Copyright
----------
+# клиент: пароль берётся только из IPERF3_PASSWORD
+IPERF3_PASSWORD=secret ./iperf-tunnel -c web.max.ru -p 5201 \
+  --username bob \
+  --rsa-public-key-path ./public.pem
+```
 
-iperf, Copyright (c) 2014-2026, The Regents of the University of
-California, through Lawrence Berkeley National Laboratory (subject
-to receipt of any required approvals from the U.S. Dept. of
-Energy).  All rights reserved.
+---
 
-If you have questions about your rights to use or distribute this
-software, please contact Berkeley Lab's Technology Transfer
-Department at TTD@lbl.gov.
+## Структура исходников
 
-NOTICE.  This software is owned by the U.S. Department of Energy.
-As such, the U.S. Government has been granted for itself and others
-acting on its behalf a paid-up, nonexclusive, irrevocable,
-worldwide license in the Software to reproduce, prepare derivative
-works, and perform publicly and display publicly.  Beginning five
-(5) years after the date permission to assert copyright is obtained
-from the U.S. Department of Energy, and subject to any subsequent
-five (5) year renewals, the U.S. Government is granted for itself
-and others acting on its behalf a paid-up, nonexclusive,
-irrevocable, worldwide license in the Software to reproduce,
-prepare derivative works, distribute copies to the public, perform
-publicly and display publicly, and to permit others to do so.
+| файл | что делает |
+|---|---|
+| `src/tunnel/main.c` | разбор опций, выбор роли, запуск клиента/сервера |
+| `src/tunnel/client.c` | SOCKS5-слушатель `127.0.0.1:8888`, воркер на коннект, мультиплексирование |
+| `src/tunnel/server.c` | приём блоков, `netdial()` к цели по `FLAG_NEW_CONN`, keepalive |
+| `src/tunnel/tunnel.c` | фрейминг блоков (`read_blk`/`write_blk`), подмена `protocol->send/recv`, очереди |
+| `src/tunnel/tunnel.h` | заголовок блока, флаги, случайный интервал keepalive |
+| `src/tunnel/queue.c` | потокобезопасная очередь + `eventfd` для уведомлений |
+| `src/tunnel/Makefile` | сборка (см. выше) |
 
-This code is distributed under a BSD style license, see the LICENSE
-file for complete information.
+---
+
+## Оригинальный iperf3
+
+Туннель построен поверх [iperf3](https://software.es.net/iperf/) - инструмента
+для измерения пропускной способности (TCP/UDP/SCTP), разработанного ESnet /
+Lawrence Berkeley National Laboratory. Этот репозиторий - его форк, поэтому
+здесь по-прежнему собираются:
+
+```sh
+./configure && make		    # → src/iperf3
+./src/iperf3 --help
+man ./src/iperf3.1          # страница руководства
+```
+
+* Документация: <https://software.es.net/iperf/>
+* Исходники и issue-трекер апстрима: <https://github.com/esnet/iperf>
+* Частые вопросы: <https://software.es.net/iperf/faq.html>
+* Лицензия: BSD-3-Clause, текст — в файле `LICENSE`
