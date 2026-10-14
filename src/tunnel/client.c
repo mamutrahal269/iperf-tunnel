@@ -27,7 +27,6 @@
 
 #define LISTEN_ADDR "127.0.0.1"
 #define LISTEN_PORT 8888
-#define HANDSHAKE_TIMEOUT_MS 10000
 
 typedef struct {
   uint64_t id;
@@ -51,58 +50,22 @@ static __attribute__((constructor)) void efd_init() {
   }
 }
 
-/* ---------------------------- SOCKS5 ---------------------------- */
-
-/* Reads exactly n bytes with a per-poll timeout. Returns 0 on success. */
-static int read_full(int fd, void *buf, size_t n, int timeout_ms) {
-  size_t got = 0;
-  while (got < n) {
-    struct pollfd p = {.fd = fd, .events = POLLIN};
-    int r = poll(&p, 1, timeout_ms);
-    if (r < 0) {
-      if (errno == EINTR) {
-        continue;
-      }
-      return -1;
-    }
-    if (r == 0) {
-      return -1; /* timeout */
-    }
-    ssize_t k = read(fd, (char *)buf + got, n - got);
-    if (k < 0) {
-      if (errno == EINTR) {
-        continue;
-      }
-      return -1;
-    }
-    if (k == 0) {
-      return -1; /* EOF */
-    }
-    got += (size_t)k;
-  }
-  return 0;
-}
-
 static void socks5_reply(int fd, uint8_t rep) {
   /* VER REP RSV ATYP=IPv4 BND.ADDR=0.0.0.0 BND.PORT=0 */
   uint8_t r[10] = {5, rep, 0, 1, 0, 0, 0, 0, 0, 0};
   (void)write_blk(fd, (char *)r, sizeof(r));
 }
 
-/* SOCKS5 greeting + CONNECT request parsing (no auth, CONNECT only).
- * On success fills host/port and returns 0. The success reply is sent
- * by the caller. On failure the error reply has already been sent
- * (where the protocol allows it) and -1 is returned. */
 static int socks5_handshake(int fd, char *host, size_t host_sz,
                             uint16_t *port) {
   uint8_t b[4];
 
   /* greeting: VER NMETHODS METHODS... */
-  if (read_full(fd, b, 2, HANDSHAKE_TIMEOUT_MS) || b[0] != 5) {
+  if (read_blk(fd, b, 2) || b[0] != 5) {
     return -1;
   }
   uint8_t methods[255];
-  if (b[1] == 0 || read_full(fd, methods, b[1], HANDSHAKE_TIMEOUT_MS)) {
+  if (b[1] == 0 || read_blk(fd, methods, b[1])) {
     return -1;
   }
   int no_auth = 0;
@@ -117,7 +80,7 @@ static int socks5_handshake(int fd, char *host, size_t host_sz,
   }
 
   /* request: VER CMD RSV ATYP */
-  if (read_full(fd, b, 4, HANDSHAKE_TIMEOUT_MS) || b[0] != 5) {
+  if (read_blk(fd, b, 4) || b[0] != 5) {
     return -1;
   }
   if (b[1] != 0x01) { /* only CONNECT */
@@ -128,7 +91,7 @@ static int socks5_handshake(int fd, char *host, size_t host_sz,
   switch (b[3]) {
   case 0x01: { /* IPv4 */
     uint8_t a[4];
-    if (read_full(fd, a, sizeof(a), HANDSHAKE_TIMEOUT_MS)) {
+    if (read_blk(fd, a, sizeof(a))) {
       return -1;
     }
     if (!inet_ntop(AF_INET, a, host, host_sz)) {
@@ -138,7 +101,7 @@ static int socks5_handshake(int fd, char *host, size_t host_sz,
   }
   case 0x04: { /* IPv6 */
     uint8_t a[16];
-    if (read_full(fd, a, sizeof(a), HANDSHAKE_TIMEOUT_MS)) {
+    if (read_blk(fd, a, sizeof(a))) {
       return -1;
     }
     if (!inet_ntop(AF_INET6, a, host, host_sz)) {
@@ -149,10 +112,10 @@ static int socks5_handshake(int fd, char *host, size_t host_sz,
   case 0x03: { /* domain name */
     uint8_t len;
     char name[256];
-    if (read_full(fd, &len, 1, HANDSHAKE_TIMEOUT_MS) || len == 0) {
+    if (read_blk(fd, &len, 1) || len == 0) {
       return -1;
     }
-    if (read_full(fd, name, len, HANDSHAKE_TIMEOUT_MS)) {
+    if (read_blk(fd, name, len)) {
       return -1;
     }
     if ((size_t)len >= host_sz || memchr(name, 0, len)) {
@@ -168,7 +131,7 @@ static int socks5_handshake(int fd, char *host, size_t host_sz,
   }
 
   uint16_t nport;
-  if (read_full(fd, &nport, sizeof(nport), HANDSHAKE_TIMEOUT_MS)) {
+  if (read_blk(fd, &nport, sizeof(nport))) {
     return -1;
   }
   *port = ntohs(nport);
@@ -225,9 +188,8 @@ static void *tunnel_worker(void *a) {
     }
     if (pollfds[0].revents & POLLIN) {
       char *buffer = NULL;
-      if (!queue_pop(wa->ent->q, (void **)&buffer) || !buffer) {
-        continue;
-      }
+      queue_pop(wa->ent->q, (void **)&buffer);
+
       tunnel_hdr *hdr = (tunnel_hdr *)buffer;
 
       if (hdr->flags & FLAG_CLOSE_CONN) {
@@ -275,13 +237,13 @@ static void *tunnel_worker(void *a) {
     }
   }
 cleanup:
-  pthread_mutex_lock(&tbl_mtx);
-  HASH_DEL(tbl, wa->ent);
-  pthread_mutex_unlock(&tbl_mtx);
-
   if (!closed) {
     send_close_blk(wa->blksize, wa->ent->id);
   }
+
+  pthread_mutex_lock(&tbl_mtx);
+  HASH_DEL(tbl, wa->ent);
+  pthread_mutex_unlock(&tbl_mtx);
 
   void *item;
   while (queue_size(wa->ent->q) > 0 && queue_pop(wa->ent->q, &item)) {
@@ -297,40 +259,6 @@ cleanup:
   return NULL;
 }
 
-static void client_new_conn(int blksize, int connfd) {
-  tunnel_wentry *ce = malloc(sizeof(tunnel_wentry));
-  if (getrandom(&ce->id, sizeof(ce->id), 0) < 0) {
-    PERR("getrandom");
-    exit(EXIT_FAILURE);
-  }
-  ce->q = queue_new();
-
-  tunnel_wargs *wa = malloc(sizeof(tunnel_wargs));
-  wa->ent = ce;
-  wa->sockfd = connfd;
-  wa->blksize = blksize;
-
-  pthread_mutex_lock(&tbl_mtx);
-  HASH_ADD(hh, tbl, id, sizeof(ce->id), ce);
-  pthread_mutex_unlock(&tbl_mtx);
-
-  pthread_t th;
-  if (pthread_create(&th, NULL, tunnel_worker, wa)) {
-    PERR("pthread_create");
-
-    pthread_mutex_lock(&tbl_mtx);
-    HASH_DEL(tbl, ce);
-    pthread_mutex_unlock(&tbl_mtx);
-
-    queue_free(ce->q);
-    free(ce);
-    free(wa);
-    close(connfd);
-    return;
-  }
-  pthread_detach(th);
-}
-
 static void *tunnel_client(void *a) {
   struct iperf_test *test = (struct iperf_test *)a;
   int blksize = test->settings->blksize;
@@ -341,7 +269,7 @@ static void *tunnel_client(void *a) {
     return NULL;
   }
 
-  int timerfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+  int timerfd = timerfd_create(CLOCK_MONOTONIC, 0);
   if (timerfd < 0) {
     PERR("timerfd_create");
     close(lfd);
@@ -370,14 +298,27 @@ static void *tunnel_client(void *a) {
       }
       break;
     }
-    if (pollfds[3].revents & POLLIN) {
-      uint64_t val;
-      read(timerfd, &val, sizeof(val));
-      char *buffer = calloc(1, blksize);
-      tunnel_hdr *hdr = set_hdr(buffer);
-      hdr->flags = FLAG_EMPTY;
-      queue_push(queue_tx, buffer);
-      timerfd_arm(timerfd, rnd_idle_ms());
+    if (pollfds[1].revents & POLLIN) {
+      char *buffer = NULL;
+      queue_pop(queue_rx, (void **)&buffer);
+
+      tunnel_hdr *hdr = (tunnel_hdr *)buffer;
+
+      if (hdr->flags & FLAG_EMPTY) {
+        free(buffer);
+        continue;
+      }
+
+      tunnel_wentry *we;
+      pthread_mutex_lock(&tbl_mtx);
+      HASH_FIND(hh, tbl, &hdr->id, sizeof(hdr->id), we);
+      if (!we) {
+        pthread_mutex_unlock(&tbl_mtx);
+        free(buffer);
+        continue;
+      }
+      queue_push(we->q, buffer);
+      pthread_mutex_unlock(&tbl_mtx);
     }
     if (pollfds[2].revents & POLLIN) {
       int connfd = accept(lfd, NULL, NULL);
@@ -386,31 +327,47 @@ static void *tunnel_client(void *a) {
           PERR("accept");
         }
       } else {
-        client_new_conn(blksize, connfd);
+        tunnel_wentry *we = malloc(sizeof(tunnel_wentry));
+        if (getrandom(&we->id, sizeof(we->id), 0) < 0) {
+          PERR("getrandom");
+          exit(EXIT_FAILURE);
+        }
+        we->q = queue_new();
+
+        tunnel_wargs *wa = malloc(sizeof(tunnel_wargs));
+        wa->ent = we;
+        wa->sockfd = connfd;
+        wa->blksize = blksize;
+
+        pthread_mutex_lock(&tbl_mtx);
+        HASH_ADD(hh, tbl, id, sizeof(we->id), we);
+        pthread_mutex_unlock(&tbl_mtx);
+
+        pthread_t th;
+        if (pthread_create(&th, NULL, tunnel_worker, wa)) {
+          PERR("pthread_create");
+
+          pthread_mutex_lock(&tbl_mtx);
+          HASH_DEL(tbl, we);
+          pthread_mutex_unlock(&tbl_mtx);
+
+          queue_free(we->q);
+          free(we);
+          free(wa);
+          close(connfd);
+        } else {
+          pthread_detach(th);
+        }
       }
     }
-    if (pollfds[1].revents & POLLIN) {
-      char *buffer = NULL;
-      if (!queue_pop(queue_rx, (void **)&buffer) || !buffer) {
-        continue;
-      }
-      tunnel_hdr *hdr = (tunnel_hdr *)buffer;
-
-      if (hdr->flags & FLAG_EMPTY) {
-        free(buffer);
-        continue;
-      }
-
-      tunnel_wentry *ce;
-      pthread_mutex_lock(&tbl_mtx);
-      HASH_FIND(hh, tbl, &hdr->id, sizeof(hdr->id), ce);
-      if (!ce) {
-        pthread_mutex_unlock(&tbl_mtx);
-        free(buffer);
-        continue;
-      }
-      queue_push(ce->q, buffer);
-      pthread_mutex_unlock(&tbl_mtx);
+    if (pollfds[3].revents & POLLIN) {
+      uint64_t val;
+      read(timerfd, &val, sizeof(val));
+      char *buffer = calloc(1, blksize);
+      tunnel_hdr *hdr = set_hdr(buffer);
+      hdr->flags = FLAG_EMPTY;
+      queue_push(queue_tx, buffer);
+      timerfd_arm(timerfd, rnd_idle_ms());
     }
   }
 

@@ -5,7 +5,11 @@
 *.o
 *.orig
 *.Po
+*.d
 /Makefile
+/iperf-tunnel
+/iperf-tunnel-debug
+src/tunnel/build/
 /autom4te.cache
 /config.log
 /config.status

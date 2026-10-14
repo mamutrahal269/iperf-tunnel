@@ -125,32 +125,26 @@ static void *tunnel_worker(void *a) {
     }
   }
 cleanup:
-  if (wa) {
-    if (wa->ent) {
-
-      if (!closed) {
-        send_close_blk(wa->blksize, wa->ent->id);
-      }
-
-      pthread_mutex_lock(&tbl_mtx);
-      HASH_DEL(tbl, wa->ent);
-      pthread_mutex_unlock(&tbl_mtx);
-
-      fprintf(stderr, "connection to %s:%d closed(id %ld)\n", wa->conn.addr,
-              wa->conn.port, wa->ent->id);
-
-      if (wa->ent->q) {
-        void *item;
-        while (queue_size(wa->ent->q) > 0 && queue_pop(wa->ent->q, &item)) {
-          free(item);
-        }
-        queue_free(wa->ent->q);
-      }
-
-      free(wa->ent);
-    }
-    free(wa);
+  if (!closed) {
+    send_close_blk(wa->blksize, wa->ent->id);
   }
+
+  pthread_mutex_lock(&tbl_mtx);
+  HASH_DEL(tbl, wa->ent);
+  pthread_mutex_unlock(&tbl_mtx);
+
+  fprintf(stderr, "connection to %s:%d closed(id %ld)\n", wa->conn.addr,
+          wa->conn.port, wa->ent->id);
+
+  void *item;
+  while (queue_size(wa->ent->q) > 0 && queue_pop(wa->ent->q, &item)) {
+    free(item);
+  }
+  queue_free(wa->ent->q);
+
+  free(wa->ent);
+  free(wa);
+
   if (sockfd >= 0) {
     close(sockfd);
   }
@@ -161,7 +155,7 @@ static void *tunnel_server(void *a) {
   struct iperf_test *test = (struct iperf_test *)a;
   int blksize = test->settings->blksize;
 
-  int timerfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+  int timerfd = timerfd_create(CLOCK_MONOTONIC, 0);
   if (timerfd < 0) {
     PERR("timerfd_create");
     return NULL;
@@ -177,33 +171,16 @@ static void *tunnel_server(void *a) {
     if (r < 0) {
       if (errno != EINTR) {
         PERR("poll");
-        exit(EXIT_FAILURE);
+        break;
       }
       continue;
     }
     if (pollfds[0].revents & POLLIN) {
       uint64_t val;
-      read(efd_serv_exit, &val, sizeof(val));
-      tunnel_wentry *we, *tmp;
-      pthread_mutex_lock(&tbl_mtx);
-      HASH_ITER(hh, tbl, we, tmp) {
-        char *buffer = malloc(blksize);
-        tunnel_hdr *hdr = set_hdr(buffer);
-        hdr->flags = FLAG_CLOSE_CONN;
-        queue_push(we->q, buffer);
+      if (read(efd_serv_exit, &val, sizeof(val)) < 0) {
+        PERR("read(efd_serv_exit)");
       }
-      pthread_mutex_unlock(&tbl_mtx);
-      close(timerfd);
-      return NULL;
-    }
-    if (pollfds[2].revents & POLLIN) {
-      uint64_t val;
-      read(timerfd, &val, sizeof(val));
-      char *buffer = calloc(1, blksize);
-      tunnel_hdr *hdr = set_hdr(buffer);
-      hdr->flags = FLAG_EMPTY;
-      queue_push(queue_tx, buffer);
-      timerfd_arm(timerfd, rnd_idle_ms());
+      break;
     }
     if (pollfds[1].revents & POLLIN) {
       char *buffer = NULL;
@@ -268,7 +245,28 @@ static void *tunnel_server(void *a) {
         pthread_mutex_unlock(&tbl_mtx);
       }
     }
+    if (pollfds[2].revents & POLLIN) {
+      uint64_t val;
+      read(timerfd, &val, sizeof(val));
+      char *buffer = calloc(1, blksize);
+      tunnel_hdr *hdr = set_hdr(buffer);
+      hdr->flags = FLAG_EMPTY;
+      queue_push(queue_tx, buffer);
+      timerfd_arm(timerfd, rnd_idle_ms());
+    }
   }
+
+  tunnel_wentry *we, *tmp;
+  pthread_mutex_lock(&tbl_mtx);
+  HASH_ITER(hh, tbl, we, tmp) {
+    char *buffer = malloc(blksize);
+    tunnel_hdr *hdr = set_hdr(buffer);
+    hdr->flags = FLAG_CLOSE_CONN;
+    queue_push(we->q, buffer);
+  }
+  pthread_mutex_unlock(&tbl_mtx);
+  close(timerfd);
+  return NULL;
 }
 static void tunnel_run_cb(struct iperf_test *test) {
   if (pthread_create(&serv_th, NULL, tunnel_server, test)) {

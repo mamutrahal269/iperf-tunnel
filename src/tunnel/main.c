@@ -11,7 +11,6 @@
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <unistd.h>
 
 int main(int argc, char *argv[]) {
@@ -30,6 +29,7 @@ int main(int argc, char *argv[]) {
       {"idle-interval-max", required_argument, 0, 'x'},
       {"authorized-users-path", required_argument, 0,
        OPT_SERVER_AUTHORIZED_USERS},
+      {"logfile", required_argument, 0, OPT_LOGFILE},
       {0, 0, 0, 0}};
 
   struct iperf_test *test = iperf_new_test();
@@ -44,7 +44,7 @@ int main(int argc, char *argv[]) {
       printf("Usage: iperf-tunnel [-s|-c host] [options]\n");
       printf("Options:\n");
       printf("  -h, --help                print this page\n");
-      printf("  -c, --client              run in client mode, connecting to <host>\n");
+      printf("  -c, --client              run in client mode, connecting to host\n");
       printf("  -s, --server              run in server mode\n");
       printf("  -p, --port                server port to listen on/connect to\n");
       printf("  -l, --length              size of tunnel frame\n");
@@ -54,6 +54,7 @@ int main(int argc, char *argv[]) {
       printf("  --rsa-public-key-path     path to the RSA public key used to encrypt\n");
       printf("  --rsa-private-key-path    path to the RSA private key used to decrypt\n");
       printf("  --authorized-users-path   path to the configuration file containing user\n");
+      printf("  --logfile                 send output to a log file (default /dev/null)\n");
       // clang-format on
       return 0;
     case 'c':
@@ -87,13 +88,18 @@ int main(int argc, char *argv[]) {
     case OPT_SERVER_AUTHORIZED_USERS:
       iperf_set_test_server_authorized_users(test, optarg);
       break;
+    case OPT_LOGFILE:
+      iperf_set_test_logfile(test, optarg);
+      break;
     default:
       fprintf(stderr, "unknown option: '%c'\n", opt);
     }
   }
 
   signal(SIGPIPE, SIG_IGN);
-  iperf_set_test_logfile(test, "/dev/null");
+  if (!test->logfile) {
+    iperf_set_test_logfile(test, "/dev/null");
+  }
 
   switch (iperf_get_test_role(test)) {
   case 'c': {
