@@ -2,7 +2,8 @@ CC       ?= cc
 CFLAGS   ?= -O3 -Wall -Wextra -pthread
 CPPFLAGS += -I..
 LDFLAGS  ?=
-LDLIBS   ?= -lssl -lcrypto -lsctp -lm -lpthread
+LDLIBS   ?= -lssl -lcrypto $(SCTP_LIB) -lm -lpthread
+SCTP_LIB ?= -lsctp
 
 DBG_CFLAGS  := -g -fsanitize=address,undefined -fno-omit-frame-pointer
 DBG_LDFLAGS := -fsanitize=address,undefined

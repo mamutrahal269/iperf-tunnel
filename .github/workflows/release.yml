@@ -42,6 +42,24 @@ jobs:
           path: iperf-tunnel-*.tar.gz
           if-no-files-found: error
 
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: build for android (termux, aarch64)
+        run: ./ci/build-android.sh
+      - name: package
+        run: |
+          stage="iperf-tunnel-${GITHUB_REF_NAME}-android-arm64"
+          mkdir -p "$stage"
+          cp iperf-tunnel README.md LICENSE "$stage"/
+          tar -czf "$stage.tar.gz" "$stage"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: iperf-tunnel-android-arm64
+          path: iperf-tunnel-*.tar.gz
+          if-no-files-found: error
+
   release:
     needs: build
     runs-on: ubuntu-latest
