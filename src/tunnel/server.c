@@ -22,7 +22,7 @@
 #include <sys/timerfd.h>
 #include <sys/types.h>
 #include <unistd.h>
-#include <uthash.h>
+#include "uthash.h"
 
 typedef struct {
   uint64_t id;

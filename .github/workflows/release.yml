@@ -1,0 +1,55 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x86_64
+          - os: ubuntu-22.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: install dependencies
+        run: |
+          sudo apt-get -y update && sudo apt-get install -y build-essential libssl-dev libsctp-dev
+      - name: build
+        run: |
+          ./configure
+          make -j"$(nproc)"
+          make -C src/tunnel
+      - name: smoke test
+        run: ./iperf-tunnel --help
+      - name: package
+        run: |
+          stage="iperf-tunnel-${GITHUB_REF_NAME}-linux-${{ matrix.arch }}"
+          mkdir -p "$stage"
+          cp iperf-tunnel README.md LICENSE "$stage"/
+          tar -czf "$stage.tar.gz" "$stage"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: iperf-tunnel-linux-${{ matrix.arch }}
+          path: iperf-tunnel-*.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: iperf-tunnel-*.tar.gz
