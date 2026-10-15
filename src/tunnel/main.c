@@ -56,6 +56,7 @@ int main(int argc, char *argv[]) {
       printf("  --authorized-users-path   path to the configuration file containing user\n");
       printf("  --logfile                 send output to a log file (default /dev/null)\n");
       // clang-format on
+      iperf_free_test(test);
       return 0;
     case 'c':
       iperf_set_test_role(test, 'c');
@@ -127,6 +128,7 @@ int main(int argc, char *argv[]) {
     }
   default:
     fprintf(stderr, "role not specified\n");
+    iperf_free_test(test);
     exit(EXIT_FAILURE);
   }
 }
