@@ -25,8 +25,8 @@
 #include <unistd.h>
 #include "uthash.h"
 
-#define LISTEN_ADDR "127.0.0.1"
-#define LISTEN_PORT 8888
+const char *tunnel_socks5_addr = "127.0.0.1";
+int tunnel_socks5_port = 8888;
 
 typedef struct {
   uint64_t id;
@@ -263,7 +263,8 @@ static void *tunnel_client(void *a) {
   struct iperf_test *test = (struct iperf_test *)a;
   int blksize = test->settings->blksize;
 
-  int lfd = netannounce(AF_INET, SOCK_STREAM, LISTEN_ADDR, NULL, LISTEN_PORT);
+  int lfd = netannounce(AF_UNSPEC, SOCK_STREAM, tunnel_socks5_addr, NULL,
+                        tunnel_socks5_port);
   if (lfd < 0) {
     PERR("netannounce");
     return NULL;

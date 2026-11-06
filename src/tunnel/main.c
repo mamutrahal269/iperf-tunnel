@@ -13,12 +13,16 @@
 #include <stdlib.h>
 #include <unistd.h>
 
+enum { OPT_SOCKS5_ADDR = 0x1000, OPT_SOCKS5_PORT };
+
 int main(int argc, char *argv[]) {
   static struct option const opts[] = {
       {"help", no_argument, 0, 'h'},
       {"client", required_argument, 0, 'c'},
       {"server", no_argument, 0, 's'},
       {"port", required_argument, 0, 'p'},
+      {"socks5-addr", required_argument, 0, OPT_SOCKS5_ADDR},
+      {"socks5-port", required_argument, 0, OPT_SOCKS5_PORT},
 
       {"length", required_argument, 0, 'l'},
       {"username", required_argument, 0, OPT_CLIENT_USERNAME},
@@ -47,6 +51,8 @@ int main(int argc, char *argv[]) {
       printf("  -c, --client              run in client mode, connecting to host\n");
       printf("  -s, --server              run in server mode\n");
       printf("  -p, --port                server port to listen on/connect to\n");
+      printf("  --socks5-addr             SOCKS5 bind address (default 127.0.0.1)\n");
+      printf("  --socks5-port             SOCKS5 listen port (default 8888)\n");
       printf("  -l, --length              size of tunnel frame\n");
       printf("  -m, --idle-interval-min   idle block interval min (ms)\n");
       printf("  -x, --idle-interval-max   idle block interval max (ms)\n");
@@ -68,6 +74,19 @@ int main(int argc, char *argv[]) {
     case 'p':
       iperf_set_test_server_port(test, atoi(optarg));
       break;
+    case OPT_SOCKS5_ADDR:
+      tunnel_socks5_addr = optarg;
+      break;
+    case OPT_SOCKS5_PORT: {
+      int port = atoi(optarg);
+      if (port < 1 || port > 65535) {
+        fprintf(stderr, "invalid SOCKS5 port: %s\n", optarg);
+        iperf_free_test(test);
+        return EXIT_FAILURE;
+      }
+      tunnel_socks5_port = port;
+      break;
+    }
     case 'l':
       iperf_set_test_blksize(test, atoi(optarg));
       break;
